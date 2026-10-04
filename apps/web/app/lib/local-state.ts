@@ -8,10 +8,57 @@ export const KEYS = {
   starred: "aihot-starred-items",
   read: "aihot-read-items",
   theme: "aihot-theme",
+  sidebarWidth: "aihot-sidebar-width",
   changelogSeen: "aihot-changelog-seen-version",
   feedbackDraft: "aihot-feedback-draft-v1",
   recentSearches: "aihot-recent-searches",
 } as const;
+
+/** The desktop sidebar's width in pixels: the range a reader can choose from, and the default. */
+export const SIDEBAR_WIDTH = { min: 160, default: 180, max: 300 } as const;
+
+/** A stored width is a run of digits and nothing else, so "180abc" and "18.5" are not partly read. */
+const SIDEBAR_WIDTH_DIGITS = /^[0-9]+$/;
+
+/** A whole-pixel width the sidebar can take, inside the range the site allows. */
+export function clampSidebarWidth(width: number): number {
+  return Math.min(SIDEBAR_WIDTH.max, Math.max(SIDEBAR_WIDTH.min, Math.round(width)));
+}
+
+/**
+ * A stored sidebar width. Only a run of digits counts as one: a missing key, a decimal, a sign, an
+ * empty string or anything else with a character in it is the default. A number in that form but
+ * outside the range is clamped, so a reader who edited it by hand keeps the direction meant.
+ */
+export function normalizeSidebarWidth(raw: string | null): number {
+  if (raw === null || !SIDEBAR_WIDTH_DIGITS.test(raw)) return SIDEBAR_WIDTH.default;
+  return clampSidebarWidth(Number(raw));
+}
+
+export function getSidebarWidth(): number {
+  return normalizeSidebarWidth(readRaw(KEYS.sidebarWidth));
+}
+
+/** Puts a width on the page: the sidebar and the page-width formulas read --sidebar-width. */
+export function applySidebarWidth(width: number) {
+  document.documentElement.style.setProperty("--sidebar-width", `${width}px`);
+}
+
+/** Keeps the width for the next visit, and puts it on the page now. */
+export function setSidebarWidth(width: number) {
+  const next = clampSidebarWidth(width);
+  writeRaw(KEYS.sidebarWidth, String(next));
+  applySidebarWidth(next);
+  invalidate(KEYS.sidebarWidth);
+}
+
+/**
+ * Inline script run before paint so the sidebar is already the reader's width. It repeats
+ * normalizeSidebarWidth's rules in the page's own words (no backslashes, which a template literal would
+ * eat); unlike the theme's, its failure fallback is to change nothing, which leaves the default in
+ * :root (app.css) in charge.
+ */
+export const SIDEBAR_BOOT_SCRIPT = `(function(){try{var s=localStorage.getItem('${KEYS.sidebarWidth}');if(s===null||!/^[0-9]+$/.test(s))s='${SIDEBAR_WIDTH.default}';var v=Math.min(${SIDEBAR_WIDTH.max},Math.max(${SIDEBAR_WIDTH.min},Number(s)));document.documentElement.style.setProperty('--sidebar-width',v+'px')}catch(e){}})();`;
 
 const STARRED_LIMIT = 500;
 const READ_LIMIT = 5000;
@@ -112,6 +159,7 @@ function subscribeKey(key: string) {
 const subscribeStarred = subscribeKey(KEYS.starred);
 const subscribeRead = subscribeKey(KEYS.read);
 const subscribeTheme = subscribeKey(KEYS.theme);
+const subscribeSidebarWidth = subscribeKey(KEYS.sidebarWidth);
 const subscribeChangelog = subscribeKey(KEYS.changelogSeen);
 const subscribeRecentSearches = subscribeKey(KEYS.recentSearches);
 
@@ -455,6 +503,10 @@ export function useReadSet(): Set<string> {
 
 export function useThemePreference(): ThemePreference {
   return useSyncExternalStore(subscribeTheme, getThemePreference, () => null);
+}
+
+export function useSidebarWidth(): number {
+  return useSyncExternalStore(subscribeSidebarWidth, getSidebarWidth, () => SIDEBAR_WIDTH.default);
 }
 
 export function useChangelogSeen(): string | null {

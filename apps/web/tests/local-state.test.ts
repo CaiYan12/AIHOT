@@ -90,3 +90,89 @@ test("failed bookmark writes and damaged existing data do not report a successfu
   window.localStorage.setItem = () => { throw new Error("quota"); };
   assert.equal(state.toggleStar(item), false);
 });
+
+// The desktop sidebar's width is reader state like the theme. A stored width is a run of digits and
+// nothing else; a reader who edited storage by hand keeps the direction they meant.
+test("the sidebar width is the default when nothing is stored or the value is not a run of digits", async () => {
+  const { state } = await reader();
+  const fallback = state.SIDEBAR_WIDTH.default;
+  for (const raw of [null, "", " ", "abc", "180px", "18.5", "1e3", "NaN", "-", "1 80", "+180", "-400", "0x10", "１８０"]) {
+    assert.equal(state.normalizeSidebarWidth(raw), fallback, `raw=${JSON.stringify(raw)}`);
+  }
+});
+
+test("a sidebar width outside the range is clamped to the nearest end, and a fractional drag is rounded", async () => {
+  const { state } = await reader();
+  const { min, max, default: fallback } = state.SIDEBAR_WIDTH;
+  assert.equal(state.normalizeSidebarWidth(String(min)), min);
+  assert.equal(state.normalizeSidebarWidth(String(fallback)), fallback);
+  assert.equal(state.normalizeSidebarWidth(String(max)), max);
+  assert.equal(state.normalizeSidebarWidth("179"), 179);
+  assert.equal(state.normalizeSidebarWidth("220"), 220);
+  // Leading zeros are still a run of digits, so they are read rather than thrown away.
+  assert.equal(state.normalizeSidebarWidth("0180"), fallback);
+  assert.equal(state.normalizeSidebarWidth("0200"), 200);
+  for (const raw of [String(min - 1), "0"]) assert.equal(state.normalizeSidebarWidth(raw), min, `raw=${raw}`);
+  for (const raw of [String(max + 1), "100000"]) assert.equal(state.normalizeSidebarWidth(raw), max, `raw=${raw}`);
+  // A drag reports fractions; what reaches storage is a whole number of pixels.
+  assert.equal(state.clampSidebarWidth(180.4), 180);
+  assert.equal(state.clampSidebarWidth(180.6), 181);
+  assert.equal(state.clampSidebarWidth(min - 1), min);
+  assert.equal(state.clampSidebarWidth(max + 1), max);
+});
+
+test("the sidebar width is read back from this browser through the same rules", async () => {
+  const { state, values } = await reader();
+  const { max, default: fallback } = state.SIDEBAR_WIDTH;
+  assert.equal(state.getSidebarWidth(), fallback, "nothing stored yet");
+  values.set(state.KEYS.sidebarWidth, "220");
+  assert.equal(state.getSidebarWidth(), 220);
+  values.set(state.KEYS.sidebarWidth, "999");
+  assert.equal(state.getSidebarWidth(), max);
+  values.set(state.KEYS.sidebarWidth, "abc");
+  assert.equal(state.getSidebarWidth(), fallback);
+});
+
+// The pre-paint script repeats the module's rules in the page's own words (it runs before any bundle),
+// so the two must agree: the reader's width has to be on the page in the first frame, not after
+// hydration. This runs it the way a browser does — bare globals, then reads back what it set.
+function runBootScript(state: typeof import("../app/lib/local-state.ts"), stored: string | null): string | null {
+  const saved = new Map<string, string>();
+  const applied = new Map<string, string>();
+  const keys = ["localStorage", "document"] as const;
+  const before = keys.map((k) => [k, Object.getOwnPropertyDescriptor(globalThis, k)] as const);
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => saved.get(key) ?? null,
+    setItem: (key: string, value: string) => { saved.set(key, value); },
+    removeItem: (key: string) => { saved.delete(key); },
+  } });
+  Object.defineProperty(globalThis, "document", { configurable: true, value: {
+    documentElement: { style: { setProperty: (name: string, value: string) => { applied.set(name, value); } } },
+  } });
+  try {
+    if (stored !== null) saved.set(state.KEYS.sidebarWidth, stored);
+    new Function(state.SIDEBAR_BOOT_SCRIPT)();
+  } finally {
+    for (const [k, descriptor] of before) {
+      if (descriptor) Object.defineProperty(globalThis, k, descriptor);
+      else Reflect.deleteProperty(globalThis, k);
+    }
+  }
+  return applied.get("--sidebar-width") ?? null;
+}
+
+test("the pre-paint script puts the stored sidebar width on the page, by the same rules", async () => {
+  const { state } = await reader();
+  const { min, max, default: fallback } = state.SIDEBAR_WIDTH;
+  const applied = (stored: string | null) => runBootScript(state, stored);
+  assert.equal(applied(String(min)), `${min}px`);
+  assert.equal(applied(String(fallback)), `${fallback}px`);
+  assert.equal(applied("220"), "220px");
+  assert.equal(applied("0200"), "200px");
+  assert.equal(applied(String(max)), `${max}px`);
+  for (const stored of [String(max + 1), "100000"]) assert.equal(applied(stored), `${max}px`, `stored=${stored}`);
+  for (const stored of [String(min - 1), "0"]) assert.equal(applied(stored), `${min}px`, `stored=${stored}`);
+  for (const stored of [null, "", " ", "abc", "18.5", "180px", "1e3", "-400", "+180"]) {
+    assert.equal(applied(stored), `${fallback}px`, `stored=${JSON.stringify(stored)}`);
+  }
+});
